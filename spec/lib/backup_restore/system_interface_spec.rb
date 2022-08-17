@@ -1,13 +1,14 @@
 # frozen_string_literal: true
 
+require 'rails_helper'
 require_relative 'shared_context_for_backup_restore'
 
-RSpec.describe BackupRestore::SystemInterface do
-  include_context "with shared stuff"
+describe BackupRestore::SystemInterface do
+  include_context "shared stuff"
 
   subject { BackupRestore::SystemInterface.new(logger) }
 
-  describe "readonly mode" do
+  context "with readonly mode" do
     after do
       Discourse::READONLY_KEYS.each { |key| Discourse.redis.del(key) }
     end
@@ -39,46 +40,6 @@ RSpec.describe BackupRestore::SystemInterface do
     end
   end
 
-  describe "#mark_restore_as_running" do
-    it "calls mark_restore_as_running" do
-      BackupRestore.expects(:mark_as_running!).once
-      subject.mark_restore_as_running
-    end
-  end
-
-  describe "#mark_restore_as_not_running" do
-    it "calls mark_restore_as_not_running" do
-      BackupRestore.expects(:mark_as_not_running!).once
-      subject.mark_restore_as_not_running
-    end
-  end
-
-  describe "#listen_for_shutdown_signal" do
-    before { BackupRestore.mark_as_running! }
-
-    after do
-      BackupRestore.clear_shutdown_signal!
-      BackupRestore.mark_as_not_running!
-    end
-
-    it "exits the process when shutdown signal is set" do
-      expect do
-        thread = subject.listen_for_shutdown_signal
-        BackupRestore.set_shutdown_signal!
-        thread.join
-      end.to raise_error(SystemExit)
-    end
-
-    it "clears an existing shutdown signal before it starts to listen" do
-      BackupRestore.set_shutdown_signal!
-      expect(BackupRestore.should_shutdown?).to eq(true)
-
-      thread = subject.listen_for_shutdown_signal
-      expect(BackupRestore.should_shutdown?).to eq(false)
-      Thread.kill(thread)
-    end
-  end
-
   describe "#pause_sidekiq" do
     after { Sidekiq.unpause! }
 
@@ -101,15 +62,9 @@ RSpec.describe BackupRestore::SystemInterface do
   end
 
   describe "#wait_for_sidekiq" do
-    it "waits 6 seconds even when there are no running Sidekiq jobs" do
-      subject.expects(:sleep).with(6).once
-      subject.wait_for_sidekiq
-    end
-
     context "with Sidekiq workers" do
-      after do
-        flush_sidekiq_redis_namespace
-      end
+      before { flush_sidekiq_redis_namespace }
+      after { flush_sidekiq_redis_namespace }
 
       def flush_sidekiq_redis_namespace
         Sidekiq.redis do |redis|
@@ -145,8 +100,13 @@ RSpec.describe BackupRestore::SystemInterface do
             run_at: Time.now.to_i,
             payload: Sidekiq.dump_json(payload)
           )
-          conn.hmset("#{key}:work", '444', data)
+          conn.hmset("#{key}:workers", '444', data)
         end
+      end
+
+      it "waits 6 seconds even when there are no running Sidekiq jobs" do
+        subject.expects(:sleep).with(6).once
+        subject.wait_for_sidekiq
       end
 
       it "waits up to 60 seconds for jobs running for the current site to finish" do
@@ -168,17 +128,66 @@ RSpec.describe BackupRestore::SystemInterface do
         subject.wait_for_sidekiq
       end
     end
-  end
 
-  describe "#flush_redis" do
-    context "with Sidekiq" do
-      after { Sidekiq.unpause! }
+    describe "flush_redis" do
+      context "with Sidekiq" do
+        after { Sidekiq.unpause! }
 
-      it "doesn't unpause Sidekiq" do
-        Sidekiq.pause!
-        subject.flush_redis
+        it "doesn't unpause Sidekiq" do
+          Sidekiq.pause!
+          subject.flush_redis
 
-        expect(Sidekiq.paused?).to eq(true)
+          expect(Sidekiq.paused?).to eq(true)
+        end
+      end
+
+      context "with backup/restore running" do
+        after do
+          subject.mark_operation_as_finished
+        end
+
+        it "doesn't remove the keys used by backup and restore" do
+          MessageBus.stubs(:last_id).with(BackupRestore::LOGS_CHANNEL).returns(17)
+          subject.mark_operation_as_running
+          BackupRestore.set_shutdown_signal!
+
+          expect(subject.is_operation_running?).to eq(true)
+          expect(BackupRestore.should_shutdown?).to eq(true)
+          expect(subject.send(:start_logs_message_id)).to eq(17)
+
+          subject.flush_redis
+          expect(subject.is_operation_running?).to eq(true)
+          expect(BackupRestore.should_shutdown?).to eq(true)
+          expect(subject.send(:start_logs_message_id)).to eq(17)
+        end
+      end
+
+      xit "removes only keys from the current site in a multisite", type: :multisite do
+        test_multisite_connection("default") do
+          Discourse.redis.set("foo", "default-foo")
+          Discourse.redis.set("bar", "default-bar")
+
+          expect(Discourse.redis.get("foo")).to eq("default-foo")
+          expect(Discourse.redis.get("bar")).to eq("default-bar")
+        end
+
+        test_multisite_connection("second") do
+          Discourse.redis.set("foo", "second-foo")
+          Discourse.redis.set("bar", "second-bar")
+
+          expect(Discourse.redis.get("foo")).to eq("second-foo")
+          expect(Discourse.redis.get("bar")).to eq("second-bar")
+
+          subject.flush_redis
+
+          expect(Discourse.redis.get("foo")).to be_nil
+          expect(Discourse.redis.get("bar")).to be_nil
+        end
+
+        test_multisite_connection("default") do
+          expect(Discourse.redis.get("foo")).to eq("default-foo")
+          expect(Discourse.redis.get("bar")).to eq("default-bar")
+        end
       end
     end
   end

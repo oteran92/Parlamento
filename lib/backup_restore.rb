@@ -2,15 +2,24 @@
 
 module BackupRestore
 
-  class OperationRunningError < RuntimeError; end
-
   VERSION_PREFIX = "v"
   DUMP_FILE = "dump.sql.gz"
+  UPLOADS_FILE = "uploads.tar.gz"
+  OPTIMIZED_IMAGES_FILE = "optimized-images.tar.gz"
+  METADATA_FILE = "meta.json"
   LOGS_CHANNEL = "/admin/backups/logs"
 
   def self.backup!(user_id, opts = {})
     if opts[:fork] == false
-      BackupRestore::Backuper.new(user_id, opts).run
+      BackupRestore::Backuper.new(
+        user_id: user_id,
+        filename: opts[:filename],
+        factory: BackupRestore::Factory.new(
+          user_id: user_id,
+          client_id: opts[:client_id]
+        ),
+        with_uploads: opts[:with_uploads]
+      ).run
     else
       spawn_process!(:backup, user_id, opts)
     end
@@ -32,24 +41,6 @@ module BackupRestore
     true
   end
 
-  def self.mark_as_running!
-    Discourse.redis.setex(running_key, 60, "1")
-    save_start_logs_message_id
-    keep_it_running
-  end
-
-  def self.is_operation_running?
-    !!Discourse.redis.get(running_key)
-  end
-
-  def self.mark_as_not_running!
-    Discourse.redis.del(running_key)
-  end
-
-  def self.should_shutdown?
-    !!Discourse.redis.get(shutdown_signal_key)
-  end
-
   def self.can_rollback?
     backup_tables_count > 0
   end
@@ -69,10 +60,6 @@ module BackupRestore
 
   def self.current_version
     ActiveRecord::Migrator.current_version
-  end
-
-  def self.postgresql_major_version
-    DB.query_single("SHOW server_version").first[/\d+/].to_i
   end
 
   def self.move_tables_between_schemas(source, destination)
@@ -116,68 +103,7 @@ module BackupRestore
     SQL
   end
 
-  DatabaseConfiguration = Struct.new(:host, :port, :username, :password, :database)
-
-  def self.database_configuration
-    config = ActiveRecord::Base.connection_pool.db_config.configuration_hash
-    config = config.with_indifferent_access
-
-    # credentials for PostgreSQL in CI environment
-    if Rails.env.test?
-      username = ENV["PGUSER"]
-      password = ENV["PGPASSWORD"]
-    end
-
-    DatabaseConfiguration.new(
-      config["backup_host"] || config["host"],
-      config["backup_port"] || config["port"],
-      config["username"] || username || ENV["USER"] || "postgres",
-      config["password"] || password,
-      config["database"]
-    )
-  end
-
   private
-
-  def self.running_key
-    "backup_restore_operation_is_running"
-  end
-
-  def self.keep_it_running
-    # extend the expiry by 1 minute every 30 seconds
-    Thread.new do
-      # this thread will be killed when the fork dies
-      while true
-        Discourse.redis.expire(running_key, 1.minute)
-        sleep 30.seconds
-      end
-    end
-  end
-
-  def self.shutdown_signal_key
-    "backup_restore_operation_should_shutdown"
-  end
-
-  def self.set_shutdown_signal!
-    Discourse.redis.set(shutdown_signal_key, "1")
-  end
-
-  def self.clear_shutdown_signal!
-    Discourse.redis.del(shutdown_signal_key)
-  end
-
-  def self.save_start_logs_message_id
-    id = MessageBus.last_id(LOGS_CHANNEL)
-    Discourse.redis.set(start_logs_message_id_key, id)
-  end
-
-  def self.start_logs_message_id
-    Discourse.redis.get(start_logs_message_id_key).to_i
-  end
-
-  def self.start_logs_message_id_key
-    "start_logs_message_id"
-  end
 
   def self.spawn_process!(type, user_id, opts)
     script = File.join(Rails.root, "script", "spawn_backup_restore.rb")
@@ -188,7 +114,10 @@ module BackupRestore
   end
 
   def self.backup_tables_count
-    DB.query_single("SELECT COUNT(*) AS count FROM information_schema.tables WHERE table_schema = 'backup'").first.to_i
+    DB.query_single(<<~SQL).first.to_i
+      SELECT COUNT(*) AS count
+      FROM information_schema.tables
+      WHERE table_schema = 'backup'
+    SQL
   end
-
 end

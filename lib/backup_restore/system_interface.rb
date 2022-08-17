@@ -8,9 +8,12 @@ module BackupRestore
   end
 
   class SystemInterface
+    LOGS_MESSAGE_ID_KEY = "start_logs_message_id"
+
     delegate :log, to: :@logger, private: true
 
     def initialize(logger)
+      # @type [Logger]
       @logger = logger
 
       @current_db = RailsMultisite::ConnectionManagement.current_db
@@ -19,52 +22,33 @@ module BackupRestore
 
     def enable_readonly_mode
       return if @readonly_mode_was_enabled
+
       log "Enabling readonly mode..."
       Discourse.enable_readonly_mode
+    rescue => ex
+      log "Something went wrong while enabling readonly mode", ex
     end
 
     def disable_readonly_mode
       return if @readonly_mode_was_enabled
+
       log "Disabling readonly mode..."
       Discourse.disable_readonly_mode
     rescue => ex
-      log "Something went wrong while disabling readonly mode.", ex
-    end
-
-    def mark_restore_as_running
-      log "Marking restore as running..."
-      BackupRestore.mark_as_running!
-    end
-
-    def mark_restore_as_not_running
-      log "Marking restore as finished..."
-      BackupRestore.mark_as_not_running!
-    rescue => ex
-      log "Something went wrong while marking restore as finished.", ex
-    end
-
-    def listen_for_shutdown_signal
-      BackupRestore.clear_shutdown_signal!
-
-      Thread.new do
-        while BackupRestore.is_operation_running?
-          exit if BackupRestore.should_shutdown?
-          sleep 0.1
-        end
-      end
+      log "Something went wrong while disabling readonly mode", ex
     end
 
     def pause_sidekiq(reason)
       return if Sidekiq.paused?
 
-      log "Pausing sidekiq..."
+      log "Pausing Sidekiq..."
       Sidekiq.pause!(reason)
     end
 
     def unpause_sidekiq
       return unless Sidekiq.paused?
 
-      log "Unpausing sidekiq..."
+      log "Unpausing Sidekiq..."
       Sidekiq.unpause!
     rescue => ex
       log "Something went wrong while unpausing Sidekiq.", ex
@@ -93,9 +77,11 @@ module BackupRestore
     end
 
     def flush_redis
+      ignored_keys = [SidekiqPauser::PAUSED_KEY, OPERATION_RUNNING_KEY, LOGS_MESSAGE_ID_KEY] + BackupRestore.redis_keys
+
       redis = Discourse.redis
       redis.scan_each(match: "*") do |key|
-        redis.del(key) unless key == SidekiqPauser::PAUSED_KEY
+        redis.del(key) unless ignored_keys.include?(key)
       end
     end
 
@@ -124,6 +110,15 @@ module BackupRestore
 
     def delete_job_if_it_belongs_to_current_site(job)
       job.delete if job.args.first&.fetch("current_site_id", nil) == @current_db
+    end
+
+    def save_start_logs_message_id
+      id = MessageBus.last_id(BackupRestore::LOGS_CHANNEL)
+      Discourse.redis.set(LOGS_MESSAGE_ID_KEY, id)
+    end
+
+    def start_logs_message_id
+      Discourse.redis.get(LOGS_MESSAGE_ID_KEY).to_i
     end
   end
 end

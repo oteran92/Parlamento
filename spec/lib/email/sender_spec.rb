@@ -541,7 +541,7 @@ RSpec.describe Email::Sender do
     context "when secure media enabled" do
       before do
         setup_s3
-        store = stub_s3_store
+        stub_s3_store
 
         SiteSetting.secure_media = true
         SiteSetting.login_required = true

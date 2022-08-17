@@ -99,11 +99,11 @@ module BackupRestore
         "DROP SCHEMA", # Discourse <= v1.5
         "CREATE SCHEMA", # PostgreSQL 11+
         "COMMENT ON SCHEMA", # PostgreSQL 11+
-        "SET default_table_access_method" # PostgreSQL 12
+        "SET default_table_access_method" # PostgreSQL 12+
       ].join("|")
 
       command = "sed -E '/^(#{unwanted_sql})/d' #{@db_dump_path}"
-      if BackupRestore.postgresql_major_version < 11
+      if postgresql_major_version < 11
         command = "#{command} | sed -E 's/^(CREATE TRIGGER.+EXECUTE) FUNCTION/\\1 PROCEDURE/'"
       end
       command
@@ -151,6 +151,10 @@ module BackupRestore
       log "Reconnecting to the database..."
       RailsMultisite::ConnectionManagement::reload if RailsMultisite::ConnectionManagement::instance
       RailsMultisite::ConnectionManagement::establish_connection(db: @current_db)
+    end
+
+    def postgresql_major_version
+      DB.query_single("SHOW server_version").first[/\d+/].to_i
     end
 
     def create_missing_discourse_functions

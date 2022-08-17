@@ -6,29 +6,28 @@ require "file_store/s3_store"
 module BackupRestore
 
   class Backuper
+    delegate :log, to: :@logger, private: true
+
     attr_reader :success
 
-    def initialize(user_id, opts = {})
+    def initialize(user_id:, factory:, filename: nil, with_uploads: nil)
       @user_id = user_id
-      @client_id = opts[:client_id]
-      @publish_to_message_bus = opts[:publish_to_message_bus] || false
-      @with_uploads = opts[:with_uploads].nil? ? include_uploads? : opts[:with_uploads]
-      @filename_override = opts[:filename]
-      @ticket = opts[:ticket]
+      @logger = factory.logger
+      @with_uploads = with_uploads.nil? ? include_uploads? : with_uploads
+      @filename_override = filename
+      @system = factory.create_system_interface
+
+      ensure_we_have_a_user
 
       initialize_state
     end
 
     def run
-      ensure_no_operation_is_running
-      ensure_we_have_a_user
-
       log "[STARTED]"
       log "'#{@user.username}' has started the backup!"
 
-      mark_backup_as_running
-
-      listen_for_shutdown_signal
+      @system.mark_operation_as_running
+      @system.listen_for_shutdown_signal
 
       ensure_directory_exists(@tmp_directory)
       ensure_directory_exists(@archive_directory)
@@ -56,16 +55,14 @@ module BackupRestore
       clean_up
       notify_user
       log "Finished!"
-      publish_completion(@success)
+
+      @success ? log("[SUCCESS]") : log("[FAILED]")
     end
 
     protected
 
-    def ensure_no_operation_is_running
-      raise BackupRestore::OperationRunningError if BackupRestore.is_operation_running?
-    end
-
     def ensure_we_have_a_user
+      @user = User.find_by(id: @user_id)
       raise Discourse::InvalidParameters.new(:user_id) unless @user
     end
 
@@ -75,8 +72,6 @@ module BackupRestore
 
     def initialize_state
       @success = false
-      @user = User.find_by(id: @user_id)
-      @logs = []
       @store = BackupRestore::BackupStore.create
       @current_db = RailsMultisite::ConnectionManagement.current_db
       @timestamp = Time.now.strftime("%Y-%m-%d-%H%M%S")
@@ -92,22 +87,8 @@ module BackupRestore
         else
           "#{File.basename(@archive_basename)}.sql.gz"
         end
-    end
 
-    def listen_for_shutdown_signal
-      BackupRestore.clear_shutdown_signal!
-
-      Thread.new do
-        while BackupRestore.is_operation_running?
-          exit if BackupRestore.should_shutdown?
-          sleep 0.1
-        end
-      end
-    end
-
-    def mark_backup_as_running
-      log "Marking backup as running..."
-      BackupRestore.mark_as_running!
+      @logs = []
     end
 
     def update_metadata
@@ -273,7 +254,7 @@ module BackupRestore
         begin
           FileUtils.mkdir_p(File.dirname(filename))
           store.download_file(upload, filename)
-        rescue StandardError => ex
+        rescue => ex
           log "Failed to download file with upload ID #{upload.id} from S3", ex
         end
 
@@ -320,8 +301,9 @@ module BackupRestore
       log "Notifying '#{@user.username}' of the end of the backup..."
       status = @success ? :backup_succeeded : :backup_failed
 
-      logs = Discourse::Utils.logs_markdown(@logs, user: @user)
-      post = SystemMessage.create_from_system_user(@user, status, logs: logs)
+      post = SystemMessage.create_from_system_user(
+        @user, status, logs: Discourse::Utils.pretty_logs(@logs)
+      )
 
       if @user.id == Discourse::SYSTEM_USER_ID
         post.topic.invite_group(@user, Group[:admins])
@@ -334,7 +316,7 @@ module BackupRestore
       log "Cleaning stuff up..."
       delete_uploaded_archive
       remove_tar_leftovers
-      mark_backup_as_not_running
+      @system.mark_operation_as_finished
       refresh_disk_space
     end
 
@@ -372,45 +354,9 @@ module BackupRestore
       log "Something went wrong while removing the following tmp directory: #{@tmp_directory}", ex
     end
 
-    def mark_backup_as_not_running
-      log "Marking backup as finished..."
-      BackupRestore.mark_as_not_running!
-    rescue => ex
-      log "Something went wrong while marking backup as finished.", ex
-    end
-
     def ensure_directory_exists(directory)
       log "Making sure '#{directory}' exists..."
       FileUtils.mkdir_p(directory)
     end
-
-    def log(message, ex = nil)
-      timestamp = Time.now.strftime("%Y-%m-%d %H:%M:%S")
-      puts(message) if !Rails.env.test?
-      publish_log(message, timestamp)
-      save_log(message, timestamp)
-      Rails.logger.error("#{ex}\n" + ex.backtrace.join("\n")) if ex
-    end
-
-    def publish_log(message, timestamp)
-      return unless @publish_to_message_bus
-      data = { timestamp: timestamp, operation: "backup", message: message }
-      MessageBus.publish(BackupRestore::LOGS_CHANNEL, data, user_ids: [@user_id], client_ids: [@client_id])
-    end
-
-    def save_log(message, timestamp)
-      @logs << "[#{timestamp}] #{message}"
-    end
-
-    def publish_completion(success)
-      if success
-        log("[SUCCESS]")
-        DiscourseEvent.trigger(:backup_complete, logs: @logs, ticket: @ticket)
-      else
-        log("[FAILED]")
-        DiscourseEvent.trigger(:backup_failed, logs: @logs, ticket: @ticket)
-      end
-    end
   end
-
 end
