@@ -1994,6 +1994,9 @@ developer:
   enable_sidebar:
     default: true
     client: true
+  enable_experimental_email_message_id_generation:
+    default: false
+    hidden: true
 
 embedding:
   embed_by_username:
