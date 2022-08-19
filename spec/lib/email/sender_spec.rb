@@ -424,20 +424,19 @@ RSpec.describe Email::Sender do
         expect(message.header['References'].to_s).to eq("<discourse/post/#{post_1.id}@test.localhost>")
       end
 
-      it "sets the In-Reply-To and References header to the most recently created replied post" do
+      it "sets the In-Reply-To and References header to the most recently created replied post, as well as the OP" do
         message.header['X-Discourse-Post-Id'] = post_4.id
 
         email_sender.send
 
         expect(message.header['Message-ID'].to_s).to eq("<discourse/post/#{post_4.id}@test.localhost>")
         expect(message.header['In-Reply-To'].to_s).to eq("<discourse/post/#{post_3.id}@test.localhost>")
-        expect(message.header['References'].to_s).to eq("<discourse/post/#{post_3.id}@test.localhost>")
+        expect(message.header['References'].to_s).to eq("<discourse/post/#{post_1.id}@test.localhost> <discourse/post/#{post_3.id}@test.localhost>")
       end
 
-      it "sets the In-Reply-To and References header to the most recently created replied post and includes the parents of that post in References" do
+      it "sets the In-Reply-To and References header to the most recently created replied post and includes the parents of that post in References, as well as the OP" do
         message.header['X-Discourse-Post-Id'] = post_4.id
         PostReply.create(post: post_2, reply: post_3)
-        PostReply.create(post: post_1, reply: post_3)
 
         email_sender.send
 
@@ -445,8 +444,8 @@ RSpec.describe Email::Sender do
         expect(message.header['In-Reply-To'].to_s).to eq("<discourse/post/#{post_3.id}@test.localhost>")
 
         references = [
-          "<discourse/post/#{post_2.id}@test.localhost>",
           "<discourse/post/#{post_1.id}@test.localhost>",
+          "<discourse/post/#{post_2.id}@test.localhost>",
           "<discourse/post/#{post_3.id}@test.localhost>"
         ]
         expect(message.header['References'].to_s).to eq(references.join(" "))

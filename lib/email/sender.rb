@@ -568,24 +568,22 @@ module Email
       @message.header["Message-ID"] = Email::MessageIdService.generate_or_use_existing(post)
 
       if post.post_number > 1
+        op_message_id = Email::MessageIdService.generate_or_use_existing(topic.first_post)
+
         ##
         # Whenever we reply to a post directly _or_ quote a post, a PostReply
         # record is made, with the reply_post_id referencing the newly created
         # post, and the post_id referencing the post that was quoted or replied to.
         referenced_posts = find_referenced_posts(post)
 
-        # TODO (martin) Is it correct to refer to the OP in this case???
         ##
         # No referenced posts means that we are just creating a new post not
         # referring to anything, and as such we should just fall back to using
         # the OP.
         if referenced_posts.empty?
-          op_message_id = Email::MessageIdService.generate_or_use_existing(topic.first_post)
           @message.header["In-Reply-To"] = op_message_id
           @message.header["References"] = op_message_id
         else
-          # TODO (martin) Do we need to include the OP Message-ID here????
-          #
           ##
           # When referencing _multiple_ posts then we just choose the most recent one
           # to use for In-Reply-To and References, then also include that post's reply
@@ -593,16 +591,22 @@ module Email
           most_recent_post_message_id = Email::MessageIdService.generate_or_use_existing(referenced_posts.first)
           @message.header["In-Reply-To"] = most_recent_post_message_id
 
-          # TODO (martin) Is it correct to include these reply of reply References here???
           ##
           # The RFC specifically states that the content of the parent's References
           # field (in our case all the other post message IDs based on PostReply)
           # first, _then_ the parent's Message-ID (in our case the outbound_message_id
           # of the post we are replying to).
-          parent_refrerenced_posts = find_referenced_posts(referenced_posts.first)
-          @message.header["References"] = parent_refrerenced_posts.map do |parent_post|
+
+          # TODO (martin) ACTUALLY need a chain of PostReply all the way back to the
+          # OP here, probably a better way to do this via SQL.
+          parent_referenced_posts = find_referenced_posts(referenced_posts.first)
+          parent_message_ids = parent_referenced_posts.map do |parent_post|
             Email::MessageIdService.generate_or_use_existing(parent_post)
-          end.concat([most_recent_post_message_id])
+          end
+
+          @message.header["References"] = [
+            op_message_id, parent_message_ids, most_recent_post_message_id
+          ].flatten.uniq
         end
       end
     end
